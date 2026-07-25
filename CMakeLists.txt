@@ -702,9 +702,8 @@ target_link_libraries(${BINARY_NAME}_static audio_library)
 target_link_libraries(${BINARY_NAME}_static translations_library)
 
 if(COMMAND qt_policy)
-  # set QTP0002 policy: target properties that specify Android-specific paths
-  # may contain generator expressions
-  qt_policy(SET QTP0002 NEW)
+  # set QTP0002 policy — skipped (needs CMake 3.28+)
+  # qt_policy(SET QTP0002 NEW)
 endif()
 
 qt_add_executable(${BINARY_NAME} WIN32 MACOSX_BUNDLE
