@@ -121,6 +121,11 @@ public slots:
 
     void setNospam(uint32_t nospam);
 
+    bool linkDevice(const QString& deviceName, QByteArray& pubkey, QByteArray& seckey);
+    bool unlinkDevice(const QByteArray& devicePubkey);
+    uint8_t getFriendDeviceCount(uint32_t friendId) const;
+    void setPowDifficulty(uint8_t difficulty);
+
 signals:
     void connected();
     void disconnected();
@@ -151,7 +156,7 @@ signals:
     void fileAvatarOfferReceived(uint32_t friendId, uint32_t fileId, const QByteArray& avatarHash,
                                  uint64_t filesize);
 
-    void friendMessageReceived(uint32_t friendId, const QString& message, bool isAction);
+    void friendMessageReceived(uint32_t friendId, const QString& message, bool isAction, uint64_t timestamp = 0);
     void friendAdded(uint32_t friendId, const ToxPk& friendPk);
 
     void friendStatusChanged(uint32_t friendId, Status::Status status);
@@ -187,7 +192,10 @@ private:
 
     static void onFriendRequest(Tox* tox, const uint8_t* cFriendPk, const uint8_t* cMessage,
                                 size_t cMessageSize, void* core);
-    static void onFriendMessage(Tox* tox, uint32_t friendId, Tox_Message_Type type,
+    static void onFriendMessage(Tox* tox, uint32_t friendId, uint64_t timestamp, Tox_Message_Type type,
+                                const uint8_t* cMessage, size_t cMessageSize, void* core);
+    static void onFriendOfflineMessage(Tox* tox, uint32_t friendId, uint64_t messageId,
+                                uint64_t sentTimestamp, Tox_Message_Type type,
                                 const uint8_t* cMessage, size_t cMessageSize, void* core);
     static void onFriendNameChange(Tox* tox, uint32_t friendId, const uint8_t* cName,
                                    size_t cNameSize, void* core);

@@ -96,6 +96,7 @@ void Core::registerCallbacks(Tox* tox)
     tox_callback_conference_peer_list_changed(tox, onConferencePeerListChange);
     tox_callback_conference_peer_name(tox, onConferencePeerNameChange);
     tox_callback_conference_title(tox, onConferenceTitleChange);
+    tox_callback_friend_offline_message(tox, onFriendOfflineMessage);
 }
 
 /**
@@ -265,7 +266,30 @@ void Core::process()
 
     ASSERT_CORE_THREAD;
 
-    tox_iterate(tox.get(), this);
+    // Event rate limiting: cap events per iteration to prevent DoS
+    Tox_Iterate_Options *iterateOpts = tox_iterate_options_new(nullptr);
+    tox_iterate_options_set_max_events_per_iterate(iterateOpts, 200);
+    Tox_Err_Events_Iterate iterErr;
+    Tox_Events *events = tox_events_iterate(tox.get(), iterateOpts, &iterErr);
+
+    if (iterErr == TOX_ERR_EVENTS_ITERATE_LIMIT_REACHED) {
+        qWarning() << "Event limit reached, some events dropped";
+    }
+
+    if (events != nullptr) {
+        tox_events_dispatch(tox.get(), events, this);
+        tox_events_free(events);
+    }
+    tox_iterate_options_free(iterateOpts);
+
+    // Poll for offline messages every 30 seconds
+    static QElapsedTimer offlinePollTimer;
+    if (!offlinePollTimer.isValid()) {
+        offlinePollTimer.start();
+    } else if (offlinePollTimer.elapsed() > 30000) {
+        offlinePollTimer.restart();
+        tox_friend_query_offline_messages(tox.get());
+    }
 
 #ifdef DEBUG
     // we want to see the debug messages immediately
@@ -376,13 +400,23 @@ void Core::onFriendRequest(Tox* tox, const uint8_t* cFriendPk, const uint8_t* cM
     emit static_cast<Core*>(core)->friendRequestReceived(friendPk, requestMessage);
 }
 
-void Core::onFriendMessage(Tox* tox, uint32_t friendId, Tox_Message_Type type,
+void Core::onFriendMessage(Tox* tox, uint32_t friendId, uint64_t timestamp, Tox_Message_Type type,
                            const uint8_t* cMessage, size_t cMessageSize, void* core)
 {
     std::ignore = tox;
     const bool isAction = (type == TOX_MESSAGE_TYPE_ACTION);
     const QString msg = ToxString(cMessage, cMessageSize).getQString();
-    emit static_cast<Core*>(core)->friendMessageReceived(friendId, msg, isAction);
+    emit static_cast<Core*>(core)->friendMessageReceived(friendId, msg, isAction, timestamp);
+}
+
+void Core::onFriendOfflineMessage(Tox* tox, uint32_t friendId, uint64_t messageId,
+    uint64_t sentTimestamp, Tox_Message_Type type, const uint8_t* cMessage, size_t cMessageSize, void* core)
+{
+    std::ignore = tox;
+    const bool isAction = (type == TOX_MESSAGE_TYPE_ACTION);
+    const QString msg = ToxString(cMessage, cMessageSize).getQString();
+    emit static_cast<Core*>(core)->friendMessageReceived(friendId, msg, isAction, sentTimestamp);
+    Q_UNUSED(messageId);
 }
 
 void Core::onFriendNameChange(Tox* tox, uint32_t friendId, const uint8_t* cName, size_t cNameSize,
@@ -622,6 +656,16 @@ bool Core::sendMessageWithType(uint32_t friendId, const QString& message, Tox_Me
     Tox_Err_Friend_Send_Message error;
     receipt = ReceiptNum{tox_friend_send_message(tox.get(), friendId, type, cMessage.data(),
                                                  cMessage.size(), &error)};
+    if (error == TOX_ERR_FRIEND_SEND_MESSAGE_FRIEND_NOT_CONNECTED) {
+        // Friend offline — try offline message storage
+        Tox_Err_Friend_Send_Offline_Message offlineErr;
+        uint64_t msgId;
+        if (tox_friend_send_offline_message(tox.get(), friendId, type,
+                cMessage.data(), cMessage.size(), &msgId, &offlineErr)) {
+            receipt = ReceiptNum{msgId};
+            return true;
+        }
+    }
     return PARSE_ERR(error);
 }
 
@@ -1328,4 +1372,54 @@ void Core::setNospam(uint32_t nospam)
 
     tox_self_set_nospam(tox.get(), nospam);
     emit idSet(getSelfId());
+}
+
+/**
+ * @brief Link a new device to this Tox ID.
+ * @param deviceName Human-readable name for the device.
+ * @param[out] pubkey Device public key (must be stored for the other device).
+ * @param[out] seckey Device secret key (must be stored for the other device).
+ * @return true on success.
+ */
+bool Core::linkDevice(const QString& deviceName, QByteArray& pubkey, QByteArray& seckey)
+{
+    const QMutexLocker<QRecursiveMutex> ml{&coreLoopLock};
+
+    pubkey.resize(TOX_PUBLIC_KEY_SIZE);
+    seckey.resize(TOX_SECRET_KEY_SIZE);
+    const QByteArray nameBytes = deviceName.toUtf8();
+
+    Tox_Err_Link_Device error;
+    const bool ok = tox_self_link_device(tox.get(), nameBytes.constData(),
+        nameBytes.size(), (uint8_t*)pubkey.data(), (uint8_t*)seckey.data(), &error);
+    return ok;
+}
+
+/**
+ * @brief Unlink a device from this Tox ID.
+ */
+bool Core::unlinkDevice(const QByteArray& devicePubkey)
+{
+    const QMutexLocker<QRecursiveMutex> ml{&coreLoopLock};
+
+    Tox_Err_Unlink_Device error;
+    return tox_self_unlink_device(tox.get(), (const uint8_t*)devicePubkey.constData(), &error);
+}
+
+/**
+ * @brief Get the number of linked devices for a friend.
+ */
+uint8_t Core::getFriendDeviceCount(uint32_t friendId) const
+{
+    const QMutexLocker<QRecursiveMutex> ml{&coreLoopLock};
+    return tox_friend_get_device_count(tox.get(), friendId);
+}
+
+/**
+ * @brief Set the proof-of-work difficulty for friend requests.
+ */
+void Core::setPowDifficulty(uint8_t difficulty)
+{
+    const QMutexLocker<QRecursiveMutex> ml{&coreLoopLock};
+    tox_self_set_pow_difficulty(tox.get(), difficulty);
 }
